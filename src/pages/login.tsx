@@ -20,7 +20,7 @@ export default function LoginPage() {
     try {
       await signIn("password", formData)
       toast.success("Welcome back!")
-      navigate("/")
+      window.location.href = "/"
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Invalid email or password")
     } finally {
