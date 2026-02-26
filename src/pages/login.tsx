@@ -5,12 +5,21 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Link, useNavigate } from "react-router"
 import { toast } from "sonner"
 import { useAuthActions } from "@convex-dev/auth/react"
-import { useState } from "react"
+import { useConvexAuth } from "convex/react"
+import { useState, useEffect } from "react"
 
 export default function LoginPage() {
   const navigate = useNavigate()
   const { signIn } = useAuthActions()
+  const { isAuthenticated } = useConvexAuth()
   const [isLoading, setIsLoading] = useState(false)
+
+  // Redirect once auth state confirms the user is logged in
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate("/")
+    }
+  }, [isAuthenticated, navigate])
 
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -20,7 +29,6 @@ export default function LoginPage() {
     try {
       await signIn("password", formData)
       toast.success("Welcome back!")
-      window.location.href = "/"
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Invalid email or password")
     } finally {

@@ -5,12 +5,21 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Link, useNavigate } from "react-router"
 import { toast } from "sonner"
 import { useAuthActions } from "@convex-dev/auth/react"
-import { useState } from "react"
+import { useConvexAuth } from "convex/react"
+import { useState, useEffect } from "react"
 
 export default function RegisterPage() {
   const navigate = useNavigate()
   const { signIn } = useAuthActions()
+  const { isAuthenticated } = useConvexAuth()
   const [isLoading, setIsLoading] = useState(false)
+  const [justRegistered, setJustRegistered] = useState(false)
+
+  useEffect(() => {
+    if (isAuthenticated && justRegistered) {
+      navigate("/setup")
+    }
+  }, [isAuthenticated, justRegistered, navigate])
 
   const handleRegister = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -20,7 +29,7 @@ export default function RegisterPage() {
     try {
       await signIn("password", formData)
       toast.success("Account created successfully!")
-      navigate("/setup")
+      setJustRegistered(true)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Registration failed")
     } finally {

@@ -14,9 +14,11 @@ export function PaywallGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!subscription.canAccess) {
-    return <Navigate to="/subscribe" replace />;
-  }
+  // Payments not yet configured - allow all authenticated users access
+  // Re-enable this once SURGENT_API_KEY is set up
+  // if (!subscription.canAccess) {
+  //   return <Navigate to="/subscribe" replace />;
+  // }
 
   return <>{children}</>;
 }

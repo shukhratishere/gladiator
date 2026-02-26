@@ -1,248 +1,135 @@
-"use node";
-
 import { action } from "./_generated/server";
 import { v } from "convex/values";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-/**
- * Check if OpenAI API key is configured
- */
-function checkOpenAIKey() {
-  if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === "sk-your-openai-api-key-here") {
-    throw new Error("OpenAI API key not configured. Please add your API key in the Database tab → Settings → Environment Variables.");
-  }
+function getGeminiKey() {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not configured in Convex env vars.");
+  return key;
 }
 
-// Analyze a meal photo and return estimated nutrition
+function toNum(x: any, fallback = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeItems(items: any[]) {
+  return (items ?? []).map((i) => ({
+    name: String(i?.name ?? "Unknown"),
+    grams: toNum(i?.grams, 0),
+    calories: toNum(i?.calories, 0),
+    protein: toNum(i?.protein, 0),
+    carbs: toNum(i?.carbs, 0),
+    fat: toNum(i?.fat, 0),
+  }));
+}
+
+function extractJson(text: string) {
+  const a = text.indexOf("{");
+  const b = text.lastIndexOf("}");
+  if (a === -1 || b === -1) throw new Error("Model did not return JSON.");
+  return JSON.parse(text.slice(a, b + 1));
+}
+
 export const analyzeMealPhoto = action({
-  args: {
-    imageUrl: v.string(),
-  },
-  returns: v.object({
-    description: v.string(),
-    items: v.array(v.object({
-      name: v.string(),
-      grams: v.number(),
-      calories: v.number(),
-      protein: v.number(),
-      carbs: v.number(),
-      fat: v.number(),
-    })),
-    totalCalories: v.number(),
-    totalProtein: v.number(),
-    totalCarbs: v.number(),
-    totalFat: v.number(),
-    confidence: v.union(v.literal("high"), v.literal("medium"), v.literal("low")),
-    tips: v.optional(v.string()),
-  }),
+  args: { imageUrl: v.string() },
   handler: async (_ctx, args) => {
-    const prompt = `You are an expert nutritionist and food analyst. Analyze this meal photo and provide detailed nutritional estimates.
+    try {
+      const genAI = new GoogleGenerativeAI(getGeminiKey());
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-For each food item visible in the image:
-1. Identify the food item
-2. Estimate the portion size in grams (be realistic based on typical serving sizes and visual cues like plate size)
-3. Calculate the nutritional values based on the estimated portion
+      const res = await fetch(args.imageUrl);
+      if (!res.ok) throw new Error(`Could not fetch image: ${res.status}`);
 
-Respond with ONLY a JSON object in this exact format (no markdown, no explanation):
+      const contentType = res.headers.get("content-type") || "image/jpeg";
+      const arrayBuf = await res.arrayBuffer();
+      const base64 = Buffer.from(arrayBuf).toString("base64");
+
+      const prompt = `
+Return ONLY valid JSON with this exact shape:
 {
-  "description": "Brief description of the meal (e.g., 'Grilled chicken breast with rice and steamed vegetables')",
+  "description": string,
+  "confidence": "low" | "medium" | "high",
   "items": [
-    {
-      "name": "Food item name",
-      "grams": estimated_grams,
-      "calories": calories_for_portion,
-      "protein": protein_grams,
-      "carbs": carb_grams,
-      "fat": fat_grams
-    }
-  ],
-  "totalCalories": sum_of_all_calories,
-  "totalProtein": sum_of_all_protein,
-  "totalCarbs": sum_of_all_carbs,
-  "totalFat": sum_of_all_fat,
-  "confidence": "high" | "medium" | "low",
-  "tips": "Optional tip about the meal (e.g., 'This is a well-balanced meal with good protein content' or 'Consider adding more vegetables for fiber')"
+    {"name": string, "grams": number, "calories": number, "protein": number, "carbs": number, "fat": number}
+  ]
 }
 
-Confidence levels:
-- "high": Clear photo, easily identifiable foods, standard portions
-- "medium": Some items unclear or unusual portions
-- "low": Poor image quality, obscured foods, or very unusual items
+Rules:
+- Be realistic and conservative.
+- Use edible portion grams.
+- If unsure, lower confidence.
+`;
 
-Be accurate - these values will be used for diet tracking. If you can't identify something clearly, make a reasonable estimate and use "medium" or "low" confidence.
+      const out = await model.generateContent([
+        { text: prompt },
+        { inlineData: { mimeType: contentType, data: base64 } },
+      ]);
 
-Common portion estimates:
-- Chicken breast: 150-200g cooked
-- Rice (cooked): 150-200g per serving
-- Steak: 150-250g
-- Pasta (cooked): 200-250g
-- Vegetables: 100-150g per side
-- Bread slice: 30-40g
-- Egg: 50g each`;
-
-    try {
-      checkOpenAIKey();
-      const openai = new OpenAI();
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              { type: "image_url", image_url: { url: args.imageUrl } },
-            ],
-          },
-        ],
-        max_tokens: 1500,
-        temperature: 0.3, // Lower temperature for more consistent estimates
-      });
-
-      const content = response.choices[0].message.content;
-      if (!content) {
-        throw new Error("No response from AI");
-      }
-
-      // Parse JSON response (handle potential markdown wrapping)
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("Could not parse AI response");
-      }
-
-      const data = JSON.parse(jsonMatch[0]);
-
-      // Validate and round values
-      const items = (data.items as Array<{
-        name: unknown;
-        grams: unknown;
-        calories: unknown;
-        protein: unknown;
-        carbs: unknown;
-        fat: unknown;
-      }>).map((item) => ({
-        name: String(item.name),
-        grams: Math.round(Number(item.grams) || 0),
-        calories: Math.round(Number(item.calories) || 0),
-        protein: Math.round((Number(item.protein) || 0) * 10) / 10,
-        carbs: Math.round((Number(item.carbs) || 0) * 10) / 10,
-        fat: Math.round((Number(item.fat) || 0) * 10) / 10,
-      }));
+      const text = out.response.text();
+      const parsed = extractJson(text);
 
       return {
-        description: String(data.description || "Meal"),
-        items,
-        totalCalories: Math.round(Number(data.totalCalories) || 0),
-        totalProtein: Math.round((Number(data.totalProtein) || 0) * 10) / 10,
-        totalCarbs: Math.round((Number(data.totalCarbs) || 0) * 10) / 10,
-        totalFat: Math.round((Number(data.totalFat) || 0) * 10) / 10,
-        confidence: (data.confidence === "high" || data.confidence === "medium" || data.confidence === "low") 
-          ? data.confidence 
-          : "medium",
-        tips: data.tips ? String(data.tips) : undefined,
+        description: String(parsed.description ?? "Meal"),
+        confidence:
+          parsed.confidence === "high" || parsed.confidence === "medium" || parsed.confidence === "low"
+            ? parsed.confidence
+            : "medium",
+        items: normalizeItems(parsed.items),
       };
-    } catch (error) {
-      console.error("Meal photo analysis failed:", error);
-      throw new Error("Failed to analyze meal photo. Please try again or log manually.");
+    } catch (e) {
+      console.error("Meal photo analysis failed:", e);
+      if (e instanceof Error) throw new Error(e.message);
+      throw new Error(String(e));
     }
   },
 });
 
-// Analyze a text description of a meal (for when user describes what they ate)
 export const analyzeMealDescription = action({
-  args: {
-    description: v.string(),
-  },
-  returns: v.object({
-    items: v.array(v.object({
-      name: v.string(),
-      grams: v.number(),
-      calories: v.number(),
-      protein: v.number(),
-      carbs: v.number(),
-      fat: v.number(),
-    })),
-    totalCalories: v.number(),
-    totalProtein: v.number(),
-    totalCarbs: v.number(),
-    totalFat: v.number(),
-  }),
+  args: { description: v.string() },
   handler: async (_ctx, args) => {
-    const prompt = `You are an expert nutritionist. Parse this meal description and provide nutritional estimates.
+    try {
+      const genAI = new GoogleGenerativeAI(getGeminiKey());
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-Meal description: "${args.description}"
+      const prompt = `
+User description: ${args.description}
 
-For each food item mentioned:
-1. Identify the food item
-2. If a portion is specified, use it. Otherwise, estimate a typical serving size.
-3. Calculate nutritional values
-
-Respond with ONLY a JSON object:
+Return ONLY valid JSON with this exact shape:
 {
+  "description": string,
+  "confidence": "low" | "medium" | "high",
   "items": [
-    {
-      "name": "Food item",
-      "grams": portion_in_grams,
-      "calories": calories,
-      "protein": protein_g,
-      "carbs": carbs_g,
-      "fat": fat_g
-    }
-  ],
-  "totalCalories": sum,
-  "totalProtein": sum,
-  "totalCarbs": sum,
-  "totalFat": sum
+    {"name": string, "grams": number, "calories": number, "protein": number, "carbs": number, "fat": number}
+  ]
 }
 
-Be accurate with nutritional values. Use standard nutritional data.`;
+Rules:
+- Realistic nutrition values.
+- If vague, infer portions and lower confidence.
+`;
 
-    try {
-      checkOpenAIKey();
-      const openai = new OpenAI();
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2,
-      });
-
-      const content = response.choices[0].message.content;
-      if (!content) {
-        throw new Error("No response from AI");
-      }
-
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("Could not parse response");
-      }
-
-      const data = JSON.parse(jsonMatch[0]);
-
-      const items = (data.items as Array<{
-        name: unknown;
-        grams: unknown;
-        calories: unknown;
-        protein: unknown;
-        carbs: unknown;
-        fat: unknown;
-      }>).map((item) => ({
-        name: String(item.name),
-        grams: Math.round(Number(item.grams) || 0),
-        calories: Math.round(Number(item.calories) || 0),
-        protein: Math.round((Number(item.protein) || 0) * 10) / 10,
-        carbs: Math.round((Number(item.carbs) || 0) * 10) / 10,
-        fat: Math.round((Number(item.fat) || 0) * 10) / 10,
-      }));
+      const out = await model.generateContent(prompt);
+      const text = out.response.text();
+      const parsed = extractJson(text);
+      const items = normalizeItems(parsed.items);
 
       return {
+        description: String(parsed.description ?? "Meal"),
+        confidence:
+          parsed.confidence === "high" || parsed.confidence === "medium" || parsed.confidence === "low"
+            ? parsed.confidence
+            : "medium",
         items,
-        totalCalories: Math.round(Number(data.totalCalories) || 0),
-        totalProtein: Math.round((Number(data.totalProtein) || 0) * 10) / 10,
-        totalCarbs: Math.round((Number(data.totalCarbs) || 0) * 10) / 10,
-        totalFat: Math.round((Number(data.totalFat) || 0) * 10) / 10,
+        totalCalories: items.reduce((s, i) => s + i.calories, 0),
+        totalProtein: items.reduce((s, i) => s + i.protein, 0),
+        totalCarbs: items.reduce((s, i) => s + i.carbs, 0),
+        totalFat: items.reduce((s, i) => s + i.fat, 0),
       };
-    } catch (error) {
-      console.error("Meal description analysis failed:", error);
-      throw new Error("Failed to analyze meal description");
+    } catch (e) {
+      console.error("Meal description analysis failed:", e);
+      if (e instanceof Error) throw new Error(e.message);
+      throw new Error(String(e));
     }
   },
 });
